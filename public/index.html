@@ -110,6 +110,17 @@
               <label>冻结版本</label>
               <select id="room-version" class="input sm"></select>
             </div>
+            <div class="field timed-field">
+              <label class="checkbox">
+                <input type="checkbox" id="room-timed-toggle" />
+                <b>限时模式</b>（每步统一倒计时；到点有票自动多数决结算，零票暂停待主持人重开）
+              </label>
+              <div class="timed-duration-row" id="room-duration-row" hidden>
+                <label>每步时长（秒，30～3600）</label>
+                <input id="room-step-duration" class="input sm" type="number" min="30" max="3600" step="1" value="120" />
+                <span class="muted">截止前可改票或由主持人提前结算；每步从实际推进时刻开始计时。</span>
+              </div>
+            </div>
             <button class="btn primary" id="btn-create-room" style="width:100%">开启房间</button>
             <div id="room-created" class="room-created hidden">
               <div>学员加入码：<code id="room-join-out" class="big-code"></code></div>
@@ -153,6 +164,7 @@
               · 本步已投 <b id="room-votes">0</b> 票
               <span id="room-role"></span>
             </div>
+            <div id="room-timer-bar" class="timer-bar hidden"></div>
           </div>
           <button class="btn ghost" id="btn-exit-room">返回列表</button>
         </div>
@@ -173,8 +185,11 @@
                 <hr class="sep" />
                 <h4>🎤 主持台</h4>
                 <div id="room-vote-detail"></div>
-                <button class="btn primary" id="btn-settle" style="width:100%">结算本步（按票数推进）</button>
-                <p class="hint">票数最多的选项推进同一条会话路径；同票按冻结版本的选项编排顺序决定；无人投票不能结算。</p>
+                <div class="host-actions">
+                  <button class="btn primary" id="btn-settle">立即结算本步（按票数推进）</button>
+                  <button class="btn" id="btn-reopen" hidden>⏱️ 重开本步（给完整时长）</button>
+                </div>
+                <p class="hint">票数最多的选项推进同一条会话路径；同票按冻结版本的选项编排顺序决定；无人投票不能结算。限时房间到点后系统会自动结算（有票）或暂停（零票），暂停时可用“重开本步”。</p>
               </div>
             </div>
           </div>

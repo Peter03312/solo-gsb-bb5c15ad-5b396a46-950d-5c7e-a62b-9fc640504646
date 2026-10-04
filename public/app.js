@@ -1076,18 +1076,35 @@ async function loadRoomVersions() {
 $('#room-scenario').addEventListener('change', loadRoomVersions);
 $('#btn-reload-rooms').addEventListener('click', loadRoomHome);
 
+// 限时模式开关：勾选后展示每步时长输入
+$('#room-timed-toggle').addEventListener('change', (e) => {
+  $('#room-duration-row').hidden = !e.target.checked;
+});
+
 $('#btn-create-room').addEventListener('click', async () => {
   const scenarioId = $('#room-scenario').value;
   const version = parseInt($('#room-version').value, 10);
   if (!scenarioId) return toast('请先选择已发布情境', 'err');
   if (!Number.isInteger(version)) return toast('请选择冻结版本', 'err');
+  const timed = $('#room-timed-toggle').checked;
+  let stepDuration = null;
+  if (timed) {
+    stepDuration = parseInt($('#room-step-duration').value, 10);
+    if (!Number.isInteger(stepDuration) || stepDuration < 30 || stepDuration > 3600) {
+      return toast('每步时长必须是 30～3600 秒之间的整数', 'err');
+    }
+  }
   try {
-    const r = await api('/api/rooms', { method: 'POST', body: { scenarioId, version } });
+    const body = { scenarioId, version };
+    if (timed) body.stepDuration = stepDuration;
+    const r = await api('/api/rooms', { method: 'POST', body });
     saveRoomCred(r.code, { hostToken: r.hostToken });
     $('#room-created').classList.remove('hidden');
     $('#room-join-out').textContent = r.joinCode;
     $('#room-host-out').textContent = r.hostToken;
-    toast(`房间已开启（绑定 v${r.version}），把加入码发给学员`, 'ok');
+    toast(r.timed
+      ? `限时房间已开启（每步 ${r.stepDurationSeconds} 秒，绑定 v${r.version}），把加入码发给学员`
+      : `房间已开启（绑定 v${r.version}），把加入码发给学员`, 'ok');
     loadRoomList();
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -1125,7 +1142,7 @@ async function loadRoomList() {
     if (!list.length) { box.innerHTML = '<div class="muted">还没有房间。培训师可在上方开启共识演练。</div>'; return; }
     box.innerHTML = `
       <table class="ses-table">
-        <thead><tr><th>房间码</th><th>情境</th><th>版本</th><th>状态</th><th>当前步</th><th>成员</th><th>开启时间</th><th></th></tr></thead>
+        <thead><tr><th>房间码</th><th>情境</th><th>版本</th><th>模式</th><th>状态</th><th>当前步</th><th>成员</th><th>开启时间</th><th></th></tr></thead>
         <tbody>
           ${list.map((r) => {
             const cred = getRoomCred(r.code);
@@ -1133,6 +1150,9 @@ async function loadRoomList() {
               <td><code>${esc(r.code)}</code></td>
               <td>${esc(r.scenario_title)}</td>
               <td>v${r.version}</td>
+              <td>${r.step_duration
+                ? `<span class="badge timed" title="限时模式：每步 ${r.step_duration} 秒">⏱️ ${r.step_duration}s/步</span>`
+                : '<span class="muted">不限时</span>'}</td>
               <td class="${r.status === 'active' ? 'status-active' : 'status-ended'}">${r.status === 'active' ? '进行中' : '已结束'}</td>
               <td>${r.step_no}</td>
               <td>${r.member_count}</td>
@@ -1167,15 +1187,19 @@ function enterRoom(code, cred) {
     hostToken: cred.hostToken || null,
     data: null,
     timer: null,
+    ticker: null,   // 限时房间每秒刷新倒计时显示
+    clockSkew: 0,   // 本地时钟相对服务器的偏差（ms）：serverNow - localNow
   };
   $('#rooms-home').hidden = true;
   $('#room-view').hidden = false;
   refreshRoom();
   roomCtx.timer = setInterval(refreshRoom, 2500);
+  roomCtx.ticker = setInterval(renderRoomCountdown, 1000);
 }
 
 function leaveRoomView() {
   if (roomCtx && roomCtx.timer) clearInterval(roomCtx.timer);
+  if (roomCtx && roomCtx.ticker) clearInterval(roomCtx.ticker);
   roomCtx = null;
 }
 
@@ -1196,9 +1220,35 @@ function roomQuery() {
 async function refreshRoom() {
   if (!roomCtx) return;
   try {
-    const data = await api(`/api/rooms/${encodeURIComponent(roomCtx.code)}${roomQuery()}`);
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomCtx.code)}${roomQuery()}`);
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* 非 JSON */ }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || `请求失败 (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    // 以服务器响应头 Date 校准本地时钟偏差，倒计时按服务器时间显示，避免本机时钟不准
+    const dateHdr = res.headers.get('date');
+    if (dateHdr) {
+      const serverNow = Date.parse(dateHdr);
+      if (Number.isFinite(serverNow)) roomCtx.clockSkew = serverNow - Date.now();
+    }
+    const prevStep = roomCtx.data ? roomCtx.data.stepNo : data.stepNo;
+    const prevPhase = roomCtx.data ? (roomCtx.data.timer && roomCtx.data.timer.phase) : null;
     roomCtx.data = data;
     renderRoom();
+    // 轮询发现系统已自动结算推进（到点有票）：横幅提示
+    if (prevStep != null && data.stepNo > prevStep) {
+      const auto = (data.settlements || []).find((s) => s.stepNo === prevStep && s.kind === 'auto');
+      if (auto) {
+        roomBanner(`⏱️ 第 ${prevStep} 步到点，系统已按投票自动结算：「${esc(auto.optionId)}」胜出并推进到第 ${data.stepNo} 步。`, 'info');
+      }
+    }
+    // 轮询发现本步刚因零票暂停
+    if (prevPhase === 'open' && data.timer && data.timer.phase === 'awaiting_reopen') {
+      roomBanner(`⏱️ 第 ${data.stepNo} 步到点且无人投票，已暂停，等待主持人重开完整时长。`, 'error');
+    }
   } catch (err) {
     if (err.status === 404 || err.status === 401) {
       leaveRoomView();
@@ -1226,6 +1276,15 @@ function renderRoom() {
     ? ' · <span class="badge v">🎤 主持人</span>'
     : (d.myVote !== null || roomCtx.memberToken ? ' · <span class="badge draft">🙋 学员</span>' : ' · <span class="muted">👀 围观（加入房间后可投票）</span>');
 
+  const timer = d.timer || { timed: !!d.timed, phase: 'open' };
+  const isPaused = timer.phase === 'awaiting_reopen';
+  const isOpenTimed = timer.timed && timer.phase === 'open';
+  // 剩余时间（按服务器时钟校准本地）；截止时间以服务器持久值为准
+  const remainingMs = () => {
+    if (!timer.deadlineMs) return null;
+    return Math.max(0, timer.deadlineMs - (Date.now() + (roomCtx.clockSkew || 0)));
+  };
+
   const node = d.currentNode;
   $('#room-node-kick').textContent = node && node.isEnd ? '结局' : '当前情境';
   $('#room-node-title').textContent = node ? node.title : '（节点缺失）';
@@ -1244,7 +1303,13 @@ function renderRoom() {
     roomBanner(`演练结束：已到达结局「${node ? node.title : ''}」，共 ${d.stepNo} 步，总分 <b>${d.totalScore}</b> 分。`, 'ok');
   } else {
     const myOpt = d.myVote && d.myVote.optionId;
-    const canVote = !!roomCtx.memberToken;
+    const canVote = !!roomCtx.memberToken && !isPaused;
+    const deadlineBlocked = isOpenTimed && remainingMs() <= 0;
+    const voteHint = isPaused
+      ? '<div class="timer-notice pause">⏱️ 本步限时结束且无人投票，已暂停投票，等待主持人重开。</div>'
+      : (deadlineBlocked
+        ? '<div class="timer-notice end">⏱️ 本步已到截止时间，正在自动结算，请稍候刷新…</div>'
+        : '');
     const avail = d.options.map((o) => `
       <button class="option-btn room-opt ${myOpt === o.id ? 'my-vote' : ''}" data-vote="${esc(o.id)}" ${canVote ? '' : 'disabled'}>
         ${esc(o.label)}
@@ -1259,10 +1324,11 @@ function renderRoom() {
         <span class="lock">${esc(o.reason)}：${o.failingConditions.map((f) => `${esc(f.stateName)} 需为「${f.required ? '是' : '否'}」`).join('；')}</span>
       </button>`).join('');
     optBox.innerHTML = (avail || '<div class="muted">当前没有可投选项。</div>') + unavail
-      + (canVote ? '' : '<div class="hint" style="margin-top:6px">你正以围观身份查看；用加入码加入房间后才能投票。</div>');
+      + voteHint
+      + (roomCtx.memberToken ? '' : '<div class="hint" style="margin-top:6px">你正以围观身份查看；用加入码加入房间后才能投票。</div>');
   }
 
-  // 主持台：逐人投票明细 + 结算
+  // 主持台：逐人投票明细 + 结算 + 重开
   const hostPanel = $('#room-host-panel');
   if (d.isHost && d.status === 'active') {
     hostPanel.hidden = false;
@@ -1273,20 +1339,70 @@ function renderRoom() {
         const opt = d.options.find((o) => o.id === v.optionId);
         return `<li>${esc(v.name)} → 「${esc(opt ? opt.label : v.optionId)}」</li>`;
       }).join('')}</ul>` : ''}`;
-    $('#btn-settle').disabled = d.totalVotes === 0;
+    const settleBtn = $('#btn-settle');
+    const reopenBtn = $('#btn-reopen');
+    settleBtn.disabled = d.totalVotes === 0 || isPaused;
+    settleBtn.textContent = isOpenTimed ? '立即结算本步（截止前提前结算）' : '立即结算本步（按票数推进）';
+    reopenBtn.hidden = !(timer.timed && isPaused);
+    if (!reopenBtn.hidden) {
+      reopenBtn.disabled = false;
+      reopenBtn.textContent = `⏱️ 重开第 ${d.stepNo} 步（再给 ${timer.stepDurationSeconds} 秒）`;
+    }
   } else {
     hostPanel.hidden = true;
   }
 
-  // 已结算路径（每步得分 + 当步票数）
+  // 已结算路径（每步得分 + 当步票数；自动结算加标记）
   const settleByStep = new Map((d.settlements || []).map((s) => [s.stepNo + 1, s]));
   $('#room-path-list').innerHTML = d.path.map((p) => {
     const st = settleByStep.get(p.step);
     const tallyText = st
-      ? `<span class="pl-sub">当场票数：${st.tallies.map((t) => `「${esc(t.optionLabel)}」${t.votes}票`).join('，')}（共 ${st.voterCount} 人投票）</span>`
+      ? `<span class="pl-sub">当场票数：${st.tallies.map((t) => `「${esc(t.optionLabel)}」${t.votes}票`).join('，')}（共 ${st.voterCount} 人投票）${st.kind === 'auto' ? ' · <b class="auto-tag">⏱️ 到点自动结算</b>' : ''}</span>`
       : '';
     return renderPathItem(p, d) + tallyText;
   }).join('') || '<li class="muted">尚未结算任何一步。</li>';
+
+  renderRoomCountdown();
+}
+
+// 每秒刷新限时条（不重新请求，按持久化的 deadlineMs 本地倒数；轮询每 2.5s 校正）
+function renderRoomCountdown() {
+  if (!roomCtx || !roomCtx.data) return;
+  const d = roomCtx.data;
+  const bar = $('#room-timer-bar');
+  const timer = d.timer;
+  if (!timer || !timer.timed || d.status === 'ended') {
+    bar.className = 'timer-bar hidden';
+    bar.textContent = '';
+    return;
+  }
+  bar.classList.remove('hidden');
+  if (timer.phase === 'awaiting_reopen') {
+    bar.className = 'timer-bar pause';
+    bar.innerHTML = `⏱️ 限时模式（每步 ${timer.stepDurationSeconds} 秒）：第 <b>${d.stepNo}</b> 步到点零票，<b>已暂停待重开</b>`
+      + (d.isHost ? ' · 请在主持台点“重开本步”' : ' · 等待主持人重开')
+      + (timer.reopenedCount ? `（本步已重开 ${timer.reopenedCount} 次）` : '');
+    return;
+  }
+  const remainMs = timer.deadlineMs
+    ? Math.max(0, timer.deadlineMs - (Date.now() + (roomCtx.clockSkew || 0)))
+    : null;
+  const fmt = (ms) => {
+    const s = Math.ceil(ms / 1000);
+    const mm = Math.floor(s / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+  };
+  const deadlineText = timer.deadlineAt
+    ? new Date(timer.deadlineMs).toLocaleString('zh-CN', { hour12: false })
+    : '—';
+  const urgent = remainMs !== null && remainMs <= 10000;
+  bar.className = 'timer-bar' + (urgent ? ' urgent' : '');
+  bar.innerHTML = `⏱️ 限时模式（每步 <b>${timer.stepDurationSeconds}</b> 秒） · 第 <b>${d.stepNo}</b> 步`
+    + ` · 截止 <b>${esc(deadlineText)}</b>`
+    + (remainMs === null ? '' : ` · 剩余 <b class="timer-remain">${fmt(remainMs)}</b>`)
+    + ` · 到点有票自动结算，零票暂停待重开`
+    + (timer.reopenedCount ? ` · 本步已重开 ${timer.reopenedCount} 次` : '');
 }
 
 function roomBanner(msg, kind) {
@@ -1300,6 +1416,10 @@ $('#room-option-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-vote]');
   if (!btn || !roomCtx || !roomCtx.memberToken || !roomCtx.data) return;
   if (roomCtx.data.status !== 'active') return;
+  const timer = roomCtx.data.timer;
+  if (timer && timer.phase === 'awaiting_reopen') {
+    return roomBanner('本步已到点且零票暂停，需主持人重开后才能投票。', 'error');
+  }
   try {
     const r = await api(`/api/rooms/${encodeURIComponent(roomCtx.code)}/vote`, {
       method: 'POST',
@@ -1326,13 +1446,33 @@ $('#btn-settle').addEventListener('click', async () => {
     renderRoom();
     const s = r.settled;
     const sign = s.score > 0 ? '+' : '';
+    const winnerLabel = (r.current.options || []).length ? s.optionLabel : s.optionLabel;
     roomBanner(
-      `第 ${s.stepNo} 步已按投票结算：「${esc(s.optionLabel)}」胜出（${s.tallies.map((t) => `「${esc(t.optionLabel)}」${t.votes}票`).join('，')}），`
+      `${r.autoSettled ? '⏱️ 该步已到点，系统自动结算' : '第 ' + s.stepNo + ' 步已结算'}：「${esc(winnerLabel)}」胜出（${s.tallies.map((t) => `「${esc(t.optionLabel)}」${t.votes}票`).join('，')}），`
       + `本步得分 ${sign}${s.score}，累计 ${s.totalScore} 分。`,
       'ok');
   } catch (err) {
     if (err.data && err.data.current) { roomCtx.data = err.data.current; renderRoom(); }
     roomBanner(`结算被拒绝：${esc(err.message)}`, 'error');
+  }
+});
+
+// 主持人重开（限时房间到点零票暂停后；携带所见步号，给本步完整时长）
+$('#btn-reopen').addEventListener('click', async () => {
+  if (!roomCtx || !roomCtx.hostToken || !roomCtx.data) return;
+  const stepNo = roomCtx.data.stepNo;
+  try {
+    const r = await api(`/api/rooms/${encodeURIComponent(roomCtx.code)}/reopen`, {
+      method: 'POST',
+      body: { hostToken: roomCtx.hostToken, observedStepNo: stepNo },
+    });
+    roomCtx.data = r.current;
+    renderRoom();
+    roomBanner(`⏱️ 已重开第 ${stepNo} 步：从现在起再给 ${r.reopened.stepDurationSeconds} 秒（截止 ${new Date(r.reopened.deadlineMs).toLocaleString('zh-CN', { hour12: false })}），请通知学员尽快投票。`, 'ok');
+    toast('本步已重开，倒计时重新开始', 'ok');
+  } catch (err) {
+    if (err.data && err.data.current) { roomCtx.data = err.data.current; renderRoom(); }
+    roomBanner(`重开被拒绝：${esc(err.message)}`, 'error');
   }
 });
 
