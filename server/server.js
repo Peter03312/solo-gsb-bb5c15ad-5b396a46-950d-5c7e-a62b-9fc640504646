@@ -25,6 +25,13 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'app.d
 const db = open(DB_PATH);
 seed(db);
 
+// 限时房间后台巡检：每秒补办一次已到点的步（无人访问或服务重启后也能自动结算/停步）。
+// 各接口在出快照前也会同步补办，巡检保证“无人访问”场景同样不丢到期处理。
+roomOps.sweepTimedRooms(db);
+setInterval(() => {
+  try { roomOps.sweepTimedRooms(db); } catch (e) { console.error('[限时房间] 巡检异常：', e); }
+}, 1000).unref();
+
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -422,24 +429,37 @@ app.get('/api/scenarios/:id/versions/:version/coverage', (req, res) => {
 
 // ---------- 共识演练房间（多人投票推进同一条会话路径） ----------
 
-// 开启房间（培训师）：{scenarioId, version?}。version 缺省为当前最新发布版；
-// 房间绑定该冻结版本，后续发布新版本不改变本场规则。
+// 开启房间（培训师）：{scenarioId, version?, stepDurationSec?}。version 缺省为当前最新
+// 发布版；stepDurationSec 省略（或 null）时为旧用法（不限时），给出时必须为 30..3600
+// 秒整数，即限时模式每步时长。房间绑定该冻结版本，后续发布新版本不改变本场规则。
 // 成功返回房间码（即学员加入码）与主持凭证。
 app.post('/api/rooms', (req, res) => {
-  const { scenarioId, version } = req.body || {};
+  const { scenarioId, version, stepDurationSec, timed, stepDuration } = req.body || {};
   if (!scenarioId) return res.status(400).json({ error: '缺少 scenarioId' });
-  const result = roomOps.createRoom(db, { scenarioId, version });
+  // 兼容写法：{timed:true, stepDuration:秒} 与 {stepDurationSec:秒} 等价；
+  // 只声明 timed:true 却不给时长 → 传 NaN 触发 STEP_DURATION_INVALID；timed:false 明确不限时
+  let duration;
+  if (stepDurationSec !== undefined) duration = stepDurationSec;
+  else if (stepDuration !== undefined) duration = stepDuration;
+  else if (timed === true) duration = NaN;
+  else duration = null;
+  if (timed === false) duration = null;
+  const result = roomOps.createRoom(db, { scenarioId, version, stepDurationSec: duration });
   if (!result.ok) return res.status(result.status).json({ error: result.error, errorCode: result.errorCode });
   res.status(201).json({
     ok: true,
     code: result.room.code,
     joinCode: result.room.code, // 学员加入码（即房间码）
-    hostToken: result.hostToken, // 主持凭证（结算时出示，请妥善保存）
+    hostToken: result.hostToken, // 主持凭证（结算/重开时出示，请妥善保存）
     scenarioId: result.room.scenario_id,
     scenarioTitle: result.scenarioTitle,
     version: result.room.version,
     sessionCode: result.room.session_code,
-    note: '房间已绑定该冻结版本，后续发布新版本不影响本场规则；学员凭加入码取得成员凭证后投票，主持人凭主持凭证结算。',
+    timed: result.room.step_duration_sec !== null,
+    stepDurationSec: result.room.step_duration_sec, // null 表示不限时（旧用法）
+    note: result.room.step_duration_sec !== null
+      ? `限时房间已开启：每步 ${result.room.step_duration_sec} 秒，到点有票自动多数决结算、零票停步待主持人重开；截止前可改票或由主持人提前结算。房间已绑定该冻结版本。`
+      : '房间已绑定该冻结版本，后续发布新版本不影响本场规则；学员凭加入码取得成员凭证后投票，主持人凭主持凭证结算。',
   });
 });
 
@@ -516,6 +536,28 @@ app.post('/api/rooms/:code/settle', (req, res) => {
     });
   }
   res.json({ ok: true, settled: result.settled, current: result.snapshot });
+});
+
+// 主持人重开暂停步（限时模式）：{hostToken, observedStepNo}。
+// 限时房间某步到点且零票时停在本步并标记待重开；主持人凭主持凭证与“所见步号”
+// 从操作时刻为该步重新给完整时长。任何失败不改变票数、路径与得分，并返回当前步号。
+app.post('/api/rooms/:code/reopen', (req, res) => {
+  const { hostToken, observedStepNo } = req.body || {};
+  if (typeof hostToken !== 'string' || !hostToken) {
+    return res.status(400).json({ error: '缺少 hostToken（主持凭证）' });
+  }
+  if (!Number.isInteger(observedStepNo)) {
+    return res.status(400).json({ error: '缺少或非法的 observedStepNo（必须为整数）' });
+  }
+  const result = roomOps.reopenStep(db, { code: req.params.code, hostToken, observedStepNo });
+  if (!result.ok) {
+    return res.status(result.status).json({
+      error: result.error,
+      errorCode: result.errorCode,
+      current: result.current || null,
+    });
+  }
+  res.json({ ok: true, reopened: result.reopened, current: result.snapshot });
 });
 
 // 兜底：未匹配的 /api 返回 JSON 404

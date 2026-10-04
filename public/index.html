@@ -110,6 +110,13 @@
               <label>冻结版本</label>
               <select id="room-version" class="input sm"></select>
             </div>
+            <div class="field">
+              <label class="checkbox"><input type="checkbox" id="room-timed" /> ⏱️ 限时模式（每步限时，到点自动按多数决结算；零票停步待主持人重开）</label>
+              <div id="room-duration-row" class="inline-row" style="margin-top:6px;display:none">
+                <input id="room-duration" class="input sm" type="number" min="30" max="3600" step="1" value="120" style="width:110px" />
+                <span class="muted">每步时长（秒，30–3600）；不勾选则与旧用法一致，不限时</span>
+              </div>
+            </div>
             <button class="btn primary" id="btn-create-room" style="width:100%">开启房间</button>
             <div id="room-created" class="room-created hidden">
               <div>学员加入码：<code id="room-join-out" class="big-code"></code></div>
@@ -151,6 +158,7 @@
               · 累计得分 <b id="room-score">0</b>
               · 成员 <b id="room-members">0</b> 人
               · 本步已投 <b id="room-votes">0</b> 票
+              <span id="room-timed-flag"></span>
               <span id="room-role"></span>
             </div>
           </div>
@@ -165,6 +173,14 @@
               <div class="node-kick" id="room-node-kick"></div>
               <h3 id="room-node-title"></h3>
               <p class="narrative" id="room-node-narrative"></p>
+              <div id="room-step-timer" class="step-timer hidden">
+                <div class="st-head">
+                  <span id="st-label">⏱️ 本步倒计时</span>
+                  <span id="st-deadline" class="muted"></span>
+                </div>
+                <div class="st-remain" id="st-remain">--:--</div>
+                <div class="st-track"><div class="st-fill" id="st-fill"></div></div>
+              </div>
             </div>
             <div class="card">
               <h4>本步处置投票</h4>
@@ -175,6 +191,8 @@
                 <div id="room-vote-detail"></div>
                 <button class="btn primary" id="btn-settle" style="width:100%">结算本步（按票数推进）</button>
                 <p class="hint">票数最多的选项推进同一条会话路径；同票按冻结版本的选项编排顺序决定；无人投票不能结算。</p>
+                <button class="btn" id="btn-reopen" style="width:100%;display:none">🔓 重开本步（恢复完整时长）</button>
+                <p class="hint" id="reopen-hint" style="display:none">本步限时已到且无人投票，已停在此步；点上方按钮可凭主持凭证重开完整时长，学员随后可继续投票。</p>
               </div>
             </div>
           </div>

@@ -370,6 +370,24 @@ code { background: #eef2f6; padding: 1px 6px; border-radius: 4px; font-size: 12p
 .vote-detail li { margin: 2px 0; }
 hr.sep { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
 
+/* ---------- 限时房间倒计时 ---------- */
+.step-timer {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: #f7f9fc;
+}
+.step-timer.paused { border-color: #f0dfa8; background: var(--warn-bg); }
+.step-timer.urgent { border-color: #f5c4bf; background: var(--err-bg); }
+.st-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+.st-remain { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0 6px; color: var(--brand-dark); }
+.step-timer.urgent .st-remain { color: var(--err); }
+.step-timer.paused .st-remain { color: var(--warn); font-size: 18px; }
+.st-track { height: 6px; border-radius: 999px; background: #e4e9f0; overflow: hidden; }
+.st-fill { height: 100%; width: 100%; background: var(--brand); border-radius: 999px; transition: width .4s linear; }
+.step-timer.urgent .st-fill { background: var(--err); }
+.step-timer.paused .st-fill { background: var(--warn); }
+.timed-flag { color: var(--brand-dark); }
+.timed-flag .badge.v { margin-left: 4px; }
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed;

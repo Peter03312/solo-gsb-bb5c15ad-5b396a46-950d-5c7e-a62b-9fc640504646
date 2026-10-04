@@ -65,6 +65,7 @@ function initSchema() {
     scenario_id     TEXT NOT NULL,
     version         INTEGER NOT NULL,        -- 开启时选定的已发布冻结版本；后续发布不影响本场
     session_code    TEXT NOT NULL REFERENCES sessions(code) ON DELETE CASCADE,
+    step_duration_sec INTEGER,               -- 限时模式每步时长（秒，30..3600）；NULL 为非限时（旧用法）
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -87,19 +88,36 @@ function initSchema() {
     PRIMARY KEY (room_code, step_no, member_token)
   );
 
-  -- 结算留痕：主键 (房间, 步号) 防并发重复结算；tallies 为该步各可选项票数快照
+  -- 结算留痕：主键 (房间, 步号) 防并发重复结算；tallies 为该步各可选项票数快照；
+  -- mode 标记本步是主持人手动结算（manual）还是到点自动结算（timeout）
   CREATE TABLE IF NOT EXISTS room_settlements (
     room_code       TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
     step_no         INTEGER NOT NULL,        -- 被结算的步号（推进前的当前步）
     option_id       TEXT NOT NULL,           -- 获胜选项
     tallies         TEXT NOT NULL,           -- JSON: [{optionId, optionLabel, votes}]
     voter_count     INTEGER NOT NULL,
+    mode            TEXT NOT NULL DEFAULT 'manual',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_code, step_no)
+  );
+
+  -- 限时房间每步计时：每步开始（房间开启 / 实际推进 / 主持人重开）时持久化截止时间。
+  -- status: running 计时中（截止前可投票/改票/提前结算）；
+  --         awaiting_reopen 到点零票停在本步，待主持人凭凭证与所见步号重开。
+  -- 非限时房间（rooms.step_duration_sec 为 NULL）不在此表建行。
+  CREATE TABLE IF NOT EXISTS room_steps (
+    room_code       TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
+    step_no         INTEGER NOT NULL,
+    deadline_ms     INTEGER NOT NULL,        -- 本步截止时间（Unix 毫秒）
+    status          TEXT NOT NULL DEFAULT 'running',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (room_code, step_no)
   );
 
   CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_code);
   CREATE INDEX IF NOT EXISTS idx_room_votes_room ON room_votes(room_code, step_no);
+  CREATE INDEX IF NOT EXISTS idx_room_steps_status ON room_steps(room_code, status);
   `);
 
   // 老库迁移：补入复盘分叉所需的溯源列
@@ -116,6 +134,16 @@ function initSchema() {
   db.exec(`UPDATE sessions SET root_code = code WHERE root_code IS NULL`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_code)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_code)`);
+
+  // 老库迁移：限时模式字段
+  const roomCols = db.prepare('PRAGMA table_info(rooms)').all();
+  if (!roomCols.some((c) => c.name === 'step_duration_sec')) {
+    db.exec('ALTER TABLE rooms ADD COLUMN step_duration_sec INTEGER');
+  }
+  const settlementCols = db.prepare('PRAGMA table_info(room_settlements)').all();
+  if (settlementCols.length && !settlementCols.some((c) => c.name === 'mode')) {
+    db.exec("ALTER TABLE room_settlements ADD COLUMN mode TEXT NOT NULL DEFAULT 'manual'");
+  }
 }
 
 function newId(prefix) {

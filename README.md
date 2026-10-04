@@ -14,6 +14,7 @@
 - **培训师复盘分叉**：可凭「源会话码 + 分歧步号 + 所见源当前步号」，从任意历史局面创建**可继续选择的分支**；分支沿用源会话绑定的冻结版本，保留分歧步之前的路径与该步现场状态，原会话与其它分支不变；已结束会话也可从其此前的非结局步分叉（结局步不得分叉），分支还可再次分叉
 - **选项评分**：培训师可为每个处置选项填写 **-10 至 10 的整数分值**与**评分说明**（留空按 0 分）；规则随版本冻结。学员每次有效选择后立即看到**本步得分、说明与累计分**；过期/重复/条件不符的选择不计分；分叉继承分歧前得分；历史会话按其绑定版本计算，旧版本无评分字段时各步按 0 分处理
 - **共识演练（房间投票）**：培训师选定**已发布的冻结版本**开启房间，取得**主持凭证**与**学员加入码**（后续发布新版本不改变本场规则）；学员凭加入码取得各自**成员凭证**，对当前步的可选处置**投票**，结算前可改票、**每人每步只计最后一票**；主持人携**所见步号**结算，**票数最多**的选项推进**同一条共享会话路径**，**同票按冻结版本的选项编排顺序**决定，**无人投票不得结算**；投票/结算/推进全部防并发重复，过期步号、无效凭证、条件不符或已结束一律返回**原因及当前步号**且不改变票数、路径与得分；房间会话**不能经单人选择入口绕过投票**；页面展示**本步票数、已结算路径与累计分**，未结算时学员看不到他人的选票
+- **限时房间（可选）**：开启房间时可勾选**限时模式**并填写**每步时长（30～3600 秒整数）**，省略即为上述非限时旧用法（请求/响应字段全部保持兼容）。限时房间在**每步开始时（开房 / 实际推进 / 主持人重开）持久化本步截止时间**，页面显示**截止时刻与剩余时间倒计时**；**截止前可随时改票或由主持人提前结算**，**到点后拒绝本步新票与改票**：有票则**沿用既有多数决、同票顺序、路径推进与计分规则自动结算**（留痕标记 `timeout`），并**从实际推进时刻**为下一步重新计时；**零票则停在本步、标记待重开**，主持人可凭**主持凭证与所见步号**将该步**重开完整时长**。**无人访问或服务重启**后，后台巡检与“访问即补办”会**补办到期结算**；自动结算、投票、手动结算与重开相遇时按步号乐观校验 + 留痕唯一约束保证**绝不重复推进**，失败返回**原因与当前步号**且不改票数、路径、得分
 - **处置覆盖报告**：培训师可针对任一**已发布冻结版本**查看覆盖情况——以该版本从初态可达的「**节点 × 进入时现场状态 × 可选选项**」组合为覆盖项，给出**总数 / 已覆盖 / 未覆盖**与逐项明细，可一键**只看未覆盖项**，方便找到学员还没练到的处置
 - 草稿中的**无效引用**（不存在的状态/目标节点）与**矛盾条件**（同一状态同时要求是和否）在保存时即被拒绝；**非整数或越界分值**同样在保存时拒绝
 
@@ -87,7 +88,7 @@ npm start
 | `APP_PORT`（仅 Compose） | `8080` | 宿主机映射端口，改它即可，无需改 Dockerfile |
 | `TZ` | `Asia/Shanghai` | 容器时区（影响时间显示） |
 
-数据库表：`scenarios`（情境及草稿）、`versions`（每次发布冻结的完整内容）、`sessions`（学员会话：步号、状态位掩码、已走路径、绑定版本，复盘分叉溯源列 `parent_code` / `fork_step_no` / `root_code`，以及房间会话标记列 `room_code`）、`rooms`（共识演练房间：加入码、主持凭证、绑定冻结版本与共享会话）、`room_members`（房间成员及成员凭证）、`room_votes`（按「房间 × 步号 × 成员」记票，每人每步只计最后一票）、`room_settlements`（每步结算留痕：获胜选项与各选项票数）。
+数据库表：`scenarios`（情境及草稿）、`versions`（每次发布冻结的完整内容）、`sessions`（学员会话：步号、状态位掩码、已走路径、绑定版本，复盘分叉溯源列 `parent_code` / `fork_step_no` / `root_code`，以及房间会话标记列 `room_code`）、`rooms`（共识演练房间：加入码、主持凭证、绑定冻结版本与共享会话；`step_duration_sec` 非空表示限时房间及每步秒数）、`room_members`（房间成员及成员凭证）、`room_votes`（按「房间 × 步号 × 成员」记票，每人每步只计最后一票）、`room_settlements`（每步结算留痕：获胜选项与各选项票数，`mode` 为 `manual` 主持人结算 / `timeout` 到点自动结算）、`room_steps`（**限时房间**每步计时：步号、持久化的截止时间 `deadline_ms` 与状态 `running`/`awaiting_reopen`）。
 
 ---
 
@@ -168,21 +169,31 @@ npm start
 
 培训师开启一个**房间**，全班学员对**同一条会话路径**逐步投票、按多数决推进：
 
-1. **开启房间（培训师）**：在“共识演练”页选择已发布情境与**冻结版本**（默认最新发布版），点「开启房间」：
+1. **开启房间（培训师）**：在“共识演练”页选择已发布情境与**冻结版本**（默认最新发布版），可勾选 **⏱️ 限时模式** 并填写**每步时长（30～3600 秒）**，点「开启房间」：
    - 系统返回 **10 位学员加入码**（即房间码）与 **主持凭证**（`host_…`，仅此处完整展示，请妥善保存）；
    - 房间**绑定所选冻结版本**：之后再发布新版本，本场规则、选项与分值一律不变；
-   - 房间同时创建一条**共享会话**（会话列表中标注 🗳️ 房间），全班的结算结果都推进这一条路径。
+   - 房间同时创建一条**共享会话**（会话列表中标注 🗳️ 房间），全班的结算结果都推进这一条路径；
+   - **不勾限时模式即旧用法（不限时）**：后续所有接口字段与行为完全一致。
 2. **学员加入**：凭加入码（可填姓名）加入，取得各自的**成员凭证**（`mem_…`，页面会自动保存在本机）；凭证即选票，勿外传。
 3. **投票 / 改票**：学员对**当前步**的可选处置投票；条件不满足的选项 🔒 灰显且服务端同样拒绝；**结算前可改票，每人每步只计最后一票**；页面实时展示**本步各选项的聚合票数**，但**未结算时学员看不到他人的选票**（主持人可见逐人明细）。
 4. **结算（主持人）**：主持人携**所见步号**结算：
    - **票数最多**的选项胜出并推进共享会话；**同票**按冻结版本中该节点**选项的编排顺序**取先者；
    - **无人投票不得结算**；所见步号过期（他人已结算）会拒绝并返回当前步号；
-   - 每步结算留痕（各选项票数、投票人数），在“已结算路径”中随逐步得分一并展示，累计分实时更新。
+   - 每步结算留痕（各选项票数、投票人数、结算方式），在“已结算路径”中随逐步得分一并展示，累计分实时更新。
 5. **结束**：共享会话到达结局即本场结束，之后投票与结算都会被拒绝（返回原因及当前步号）；已结束房间仍可进入观摩路径与票数。
-6. **边界规则**：
+6. **限时房间规则**（勾选限时模式时生效）：
+   - **每步开始即持久化截止时间**：开房即开始第 0 步计时；每次（手动或自动）实际推进后，从**实际推进时刻**为下一步重新给完整时长；
+   - 页面常驻显示**本步截止时刻与剩余时间倒计时**（≤10 秒红色提醒，时间以服务端 `serverNowMs`/`deadlineMs` 为准，不依赖本地时钟）；
+   - **截止前**：学员可正常投票/改票，主持人可**提前结算**（`manual`）；
+   - **到点后**：本步新票与改票一律拒绝（已被自动推进 → `STEP_STALE`；零票停步 → `STEP_AWAITING_REOPEN`）；
+   - **到点有票**：沿用既有**多数决、同票顺序、路径推进与计分规则自动结算**（留痕 `timeout`，页面路径标注“⏱️ 到点自动结算”）；
+   - **到点零票**：**停在本步、不改票数/路径/得分**并标记**待重开**（`stepStatus=awaiting_reopen`）；主持人在主持台点「🔓 重开本步」（或调 `/reopen`，凭主持凭证 + 所见步号），即从操作时刻**重新给该步完整时长**，学员随后可继续投票；
+   - **无人访问 / 服务重启**也不丢到期处理：服务启动时立即巡检一次，之后每秒巡检全部到点限时步；任何房间接口在出快照前也会同步补办；
+   - 自动结算、投票、手动结算、重开**并发相遇**时，事务内步号乐观校验 + `(房间, 步号)` 留痕唯一约束保证**同一步只推进一次**；失败一律返回原因与 `current.stepNo`，不改票数、路径、得分。
+7. **边界规则**：
    - 房间的共享会话**不能经单人选择入口推进**（`POST /api/sessions/:code/move` 对房间会话返回 `409 ROOM_SOLO_MOVE_FORBIDDEN`），只能走“投票 + 结算”；
    - 房间会话仍可被**复盘分叉**：从任意历史非结局步分叉出的分支是普通单人会话，可继续单人选择，不影响房间；
-   - 过期步号、无效凭证、条件不符、已结束等失败一律**不改变票数、路径与得分**，响应中携带原因及当前步号（`current.stepNo`）。
+   - 过期步号、无效凭证、条件不符、已结束、限时到点等失败一律**不改变票数、路径与得分**，响应中携带原因及当前步号（`current.stepNo`）。
 
 ---
 
@@ -229,12 +240,13 @@ npm start
 | POST | `/api/scenarios/:id/analyze` | 发布前检查（可带未保存草稿） |
 | POST | `/api/scenarios/:id/publish` | 发布冻结新版本（检查不过返回 422 与可复现路径） |
 | GET | `/api/scenarios/:id/versions/:version/coverage` | **处置覆盖报告**（可加 `?uncovered=1` 只列未覆盖项；计数始终基于全量） |
-| POST | `/api/rooms` | `{scenarioId, version?}` 开启共识演练房间（绑定冻结版本），返回加入码与主持凭证（201） |
-| GET | `/api/rooms` | 最近房间列表（不含凭证与投票明细） |
-| GET | `/api/rooms/:code` | 房间现状：当前步、可选处置与聚合票数、已结算路径、累计分；`?memberToken=` 附 `myVote`，`?hostToken=` 附逐人投票明细 |
+| POST | `/api/rooms` | `{scenarioId, version?, stepDurationSec?}` 开启共识演练房间（绑定冻结版本）；`stepDurationSec` 为 30..3600 整数秒即限时模式，省略/`null` 为不限时旧用法；返回加入码、主持凭证与 `timed`/`stepDurationSec`（201） |
+| GET | `/api/rooms` | 最近房间列表（不含凭证与投票明细；附 `step_duration_sec` 及当前步 `step_status`/`deadline_ms`） |
+| GET | `/api/rooms/:code` | 房间现状：当前步、可选处置与聚合票数、已结算路径、累计分、**限时信息（截止/剩余）**；`?memberToken=` 附 `myVote`，`?hostToken=` 附逐人投票明细 |
 | POST | `/api/rooms/:code/join` | `{name?}` 学员加入，返回成员凭证（201） |
-| POST | `/api/rooms/:code/vote` | `{memberToken, optionId, stepNo}` 投票/改票（每人每步只计最后一票） |
-| POST | `/api/rooms/:code/settle` | `{hostToken, observedStepNo}` 主持人结算：多数决推进共享会话，同票按编排顺序 |
+| POST | `/api/rooms/:code/vote` | `{memberToken, optionId, stepNo}` 投票/改票（每人每步只计最后一票；限时到点后拒绝） |
+| POST | `/api/rooms/:code/settle` | `{hostToken, observedStepNo}` 主持人结算：截止前可提前结算；多数决推进共享会话，同票按编排顺序，返回的 `settled.mode` 为 `manual`/`timeout` |
+| POST | `/api/rooms/:code/reopen` | `{hostToken, observedStepNo}` **限时房间**主持人重开“到点零票暂停步”，从操作时刻恢复该步完整时长 |
 
 ### 评分相关字段（随版本冻结，旧版本/旧会话自动按 0 分兜底）
 
@@ -432,18 +444,41 @@ node -e 'fetch("http://localhost:8080/api/scenarios/sc_14f5505a2f47a3a3/versions
 房间快照主要字段：`code`（加入码）、`version`（绑定冻结版本）、`status`、`stepNo`、
 `totalScore`、`currentNode`、`states`、`options`（可选处置，各带 `votes` 聚合票数）、
 `unavailableOptions`（条件不满足的处置）、`memberCount`、`totalVotes`、`path`（已结算路径，
-含每步得分）、`settlements`（每步结算留痕：各选项票数与投票人数）；带成员凭证时附
-`myVote`，带主持凭证时附 `votes`（逐人明细）与 `members`。**未结算前学员视图不含他人选票。**
+含每步得分与 `settleMode`：`manual`/`timeout`）、`settlements`（每步结算留痕：各选项票数、
+投票人数与结算方式 `mode`）；带成员凭证时附 `myVote`，带主持凭证时附 `votes`（逐人明细）
+与 `members`。**未结算前学员视图不含他人选票。**
+
+**限时模式增量字段**（非限时房间同样返回，取值为 false/null，旧用法字段行为不变）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `timed` | 是否限时房间 |
+| `stepDurationSec` | 每步时长（秒，30..3600）；非限时为 `null` |
+| `stepStatus` | 当前步限时状态：`running` 计时中 / `awaiting_reopen` 到点零票待重开 / `null`（非限时或已结束） |
+| `deadlineMs` / `deadlineAt` | 本步截止时间（Unix 毫秒 / ISO 字符串），每步开始时持久化；非限时或已结束为 `null` |
+| `remainingMs` | 剩余毫秒（`running` 时为 `max(0, deadline-now)`，其余为 `null`） |
+| `serverNowMs` | 出快照时的服务端时间（毫秒），页面据此校准倒计时，避免客户端时钟偏差 |
 
 ```bash
 # 0) 培训师开启房间：绑定已发布冻结版本（version 缺省为当前最新发布版）
+#    —— 非限时（旧用法，省略 stepDurationSec 即可，字段行为与以前完全一致）——
 curl -s -X POST localhost:8080/api/rooms \
   -H 'Content-Type: application/json' \
   -d '{"scenarioId":"sc_14f5505a2f47a3a3","version":1}'
 # 201 -> { "ok":true, "code":"7d24ee9bb0", "joinCode":"7d24ee9bb0",
-#          "hostToken":"host_10b2a174…",   # 主持凭证，仅此处完整返回，妥善保存
+#          "hostToken":"host_10b2a174…",
+#          "timed":false, "stepDurationSec":null,
 #          "version":1, "sessionCode":"dff651d1c6", ... }
-#    此后即使发布 v2，本房间仍按 v1 的冻结规则与分值进行
+
+#    —— 限时模式：每步 120 秒（必须为 30..3600 的整数，否则 400 STEP_DURATION_INVALID）——
+curl -s -X POST localhost:8080/api/rooms \
+  -H 'Content-Type: application/json' \
+  -d '{"scenarioId":"sc_14f5505a2f47a3a3","version":1,"stepDurationSec":120}'
+# 201 -> { "ok":true, "code":"ab12cd34ef", "joinCode":"ab12cd34ef",
+#          "hostToken":"host_9f…",
+#          "timed":true, "stepDurationSec":120,
+#          "version":1, "sessionCode":"c0ffee…", ... }
+#    此后即使发布 v2，本房间仍按 v1 的冻结规则与分值进行；第 0 步截止时间已持久化。
 
 # 1) 学员凭加入码加入，取得成员凭证
 curl -s -X POST localhost:8080/api/rooms/7d24ee9bb0/join \
@@ -463,11 +498,12 @@ curl -s 'localhost:8080/api/rooms/7d24ee9bb0?memberToken=mem_ee54ed…'
 curl -s 'localhost:8080/api/rooms/7d24ee9bb0?hostToken=host_10b2a174…'   # 主持人可见 votes 明细
 
 # 4) 主持人携所见步号结算：多数决推进；同票按冻结版本的选项编排顺序
+#    （限时房间在截止前也可随时提前手动结算，返回 mode:"manual"）
 curl -s -X POST localhost:8080/api/rooms/7d24ee9bb0/settle \
   -H 'Content-Type: application/json' \
   -d '{"hostToken":"host_10b2a174…","observedStepNo":0}'
 # -> { "ok":true,
-#      "settled":{ "stepNo":0, "optionId":"o_cut_power",
+#      "settled":{ "stepNo":0, "optionId":"o_cut_power", "mode":"manual",
 #                  "tallies":[{"optionId":"o_cut_power","optionLabel":"…","votes":1},
 #                             {"optionId":"o_rush_in","optionLabel":"…","votes":1}],
 #                  "voterCount":2, "score":3, "scoreNote":"…", "totalScore":3 },
@@ -476,6 +512,71 @@ curl -s -X POST localhost:8080/api/rooms/7d24ee9bb0/settle \
 
 # 5) 房间列表
 curl -s localhost:8080/api/rooms
+```
+
+限时房间专属调用示例（房间码 `ab12cd34ef`，每步 120 秒）：
+
+```bash
+# 房间现状（任何人可查；快照带截止时间/剩余时间，倒计时以服务端时间为准）
+curl -s localhost:8080/api/rooms/ab12cd34ef | jq \
+  '{stepNo,status,timed,stepDurationSec,stepStatus,deadlineAt,remainingMs,serverNowMs,totalVotes}'
+# -> { "stepNo":0, "status":"active", "timed":true, "stepDurationSec":120,
+#      "stepStatus":"running",
+#      "deadlineAt":"2026-10-04T10:15:32.418Z",
+#      "remainingMs":104320, "serverNowMs":1791195212418, "totalVotes":0 }
+
+# 截止前：投票/改票照常（每人每步只计最后一票）；主持人也可提前 settle（mode:"manual"）
+curl -s -X POST localhost:8080/api/rooms/ab12cd34ef/vote \
+  -H 'Content-Type: application/json' \
+  -d '{"memberToken":"mem_ee54ed…","optionId":"o_cut_power","stepNo":0}'
+
+# 到点有票：无需任何人操作，后台巡检（无人访问也执行）/下一次访问会自动多数决结算，
+# 并从“实际推进时刻”为下一步重新计时；GET 快照即可能观察到已自动推进：
+curl -s localhost:8080/api/rooms/ab12cd34ef | jq \
+  '{stepNo,stepStatus,remainingMs,last:.settlements[-1]}'
+# -> { "stepNo":1, "stepStatus":"running", "remainingMs":119980,
+#      "last":{ "stepNo":0, "optionId":"o_cut_power", "mode":"timeout",
+#               "voterCount":2, "tallies":[ …同一步数快照… ] } }
+
+# 到点后再对旧步（stepNo:0）投票/改票：拒绝且不改票数（已推进则 STEP_STALE）
+# 409 { "errorCode":"STEP_STALE",
+#       "error":"步号不匹配：…可能已被结算/到点自动推进…未计票",
+#       "current":{ "stepNo":1, "totalScore":3, ... } }
+
+# 到点零票：停在本步，stepStatus="awaiting_reopen"（GET 即可见），投票与直接结算都被拒绝
+# 投票：409 { "errorCode":"STEP_AWAITING_REOPEN", "current":{ "stepNo":0, "totalVotes":0,
+#             "stepStatus":"awaiting_reopen", ... } }
+# 结算：409 { "errorCode":"STEP_AWAITING_REOPEN", "…" }
+
+# 主持人凭主持凭证 + 所见步号重开该步（恢复完整 120 秒，从操作时刻起算）
+curl -s -X POST localhost:8080/api/rooms/ab12cd34ef/reopen \
+  -H 'Content-Type: application/json' \
+  -d '{"hostToken":"host_9f…","observedStepNo":0}'
+# -> { "ok":true,
+#      "reopened":{ "stepNo":0, "stepDurationSec":120,
+#                   "deadlineMs":1791195932114,
+#                   "deadlineAt":"2026-10-04T10:18:52.114Z" },
+#      "current":{ "stepNo":0, "stepStatus":"running", "remainingMs":120000, ... } }
+#    重开后学员可继续投票；该步再次到点时仍按“有票自动结算 / 零票再待重开”处理。
+```
+
+限时相关失败响应（均不改变票数、路径与得分，并返回当前步号）：
+
+```bash
+# 每步时长越界 / 非整数（含字符串数字）——开房被拒，房间未创建
+# 400 { "errorCode":"STEP_DURATION_INVALID",
+#       "error":"每步时长非法：29（限时模式必须填写 30..3600 秒的整数；省略则不限时）" }
+
+# 对非限时房间调用重开
+# 400 { "errorCode":"NOT_TIMED_ROOM", "error":"该房间不是限时房间，没有限时步需要重开" }
+
+# 重开时所见步号过期（已被自动/手动推进），或该步仍在计时中无需重开
+# 409 { "errorCode":"STEP_STALE", "current":{ "stepNo":1, ... } }
+# 409 { "errorCode":"STEP_NOT_PAUSED", "error":"第 0 步仍在计时中，无需重开…",
+#       "current":{ "stepNo":0, "stepStatus":"running", ... } }
+
+# 自动结算与手动结算并发相遇：只有一个成功（留痕 (房间,步号) 唯一），
+# 另一个得到 STEP_STALE 且不重复推进、不改分数。
 ```
 
 典型失败响应（均不改变票数、路径与得分，并返回当前步号）：
@@ -495,6 +596,11 @@ curl -s localhost:8080/api/rooms
 # 无人投票不得结算
 # 409 { "errorCode":"NO_VOTES", "error":"当前步还没有任何投票，不能结算", ... }
 
+# 限时到点：到点零票暂停步上的投票/结算
+# 409 { "errorCode":"STEP_AWAITING_REOPEN",
+#       "error":"第 N 步限时已到且无人投票，已停在本步等待主持人重开…",
+#       "current":{ "stepNo":N, "stepStatus":"awaiting_reopen", ... } }
+
 # 已结束（到达结局后）
 # 409 { "errorCode":"ROOM_ENDED", "current":{ "stepNo":4, ... } }
 
@@ -508,6 +614,19 @@ curl -s localhost:8080/api/rooms
 - 投票按「房间 × 步号 × 成员」唯一约束 UPSERT，改票与并发重复投票天然幂等，只计最后一票；
 - 结算在事务内按当前步号乐观校验并留痕（「房间 × 步号」唯一），并发结算只有一个成功，
   其余得到 `STEP_STALE`；推进共享会话复用与单人完全一致的条件/状态/结局规则；
+- **限时模式为纯增量扩展**：
+  - `POST /api/rooms` 新增**可选**请求字段 `stepDurationSec`（30..3600 秒整数；省略/`null` 即非限时旧用法），
+    响应增量返回 `timed` / `stepDurationSec`；开房、加入、投票、主持结算的**既有请求字段与响应字段全部继续可用**；
+  - 房间快照增量返回 `timed` / `stepDurationSec` / `stepStatus` / `deadlineMs` / `deadlineAt` /
+    `remainingMs` / `serverNowMs`（非限时房间取值为 `false`/`null`），`path[]` 与 `settlements[]`
+    增量带 `settleMode` / `mode`（旧留痕与非限时手动结算均为 `manual`）；
+  - 新增接口仅 `POST /api/rooms/:code/reopen`（主持人重开零票暂停步）；新增错误码
+    `STEP_DURATION_INVALID` / `STEP_AWAITING_REOPEN` / `STEP_NO_INVALID` / `NOT_TIMED_ROOM` / `STEP_NOT_PAUSED`；
+  - 到期自动结算复用**既有多数决、同票按编排顺序、路径推进与计分规则**，唯一差异是留痕 `mode=timeout`，
+    并从事务内**实际推进时刻**为下一步计时；
+  - 到期补办有双保险：服务**启动时巡检一次**、之后**每秒后台巡检**全部到点限时步，且**任何房间接口
+    出快照前在事务内同步补办**——无人访问或重启后都不会漏；自动结算 / 手动结算 / 投票 / 重开并发相遇时
+    靠事务 + 步号乐观校验 + 留痕唯一约束保证**同一步只推进一次**，失败返回原因与当前步号且不改票数/路径/得分；
 - 既有单人会话与复盘分叉接口的**路径、方法及请求响应约定不变**，仅作增量扩展：
   会话快照新增 `roomCode`（非空表示房间共享会话）、`GET /api/sessions` 每行新增 `room_code`；
   房间会话可正常查询与分叉（分叉出的分支是普通会话），但不能经 `/move` 推进。
@@ -522,17 +641,17 @@ curl -s localhost:8080/api/rooms
 ├── docker-compose.yml
 ├── package.json / package-lock.json
 ├── server/
-│   ├── server.js      # Express 路由（编排 / 发布 / 会话 / 复盘分叉 / 处置覆盖报告 / 共识演练房间接口）
+│   ├── server.js      # Express 路由（编排 / 发布 / 会话 / 复盘分叉 / 处置覆盖报告 / 共识演练房间接口，含限时巡检）
 │   ├── db.js          # SQLite 连接、建表（含老库加列迁移）、id 生成
 │   ├── scenario.js    # 草稿校验 + 状态空间可达性/死路/循环分析
 │   ├── session.js     # 会话快照、“带步号的一步”推进（房间会话拒绝单人入口）、forkSession 分叉、loadLineage 对照树
-│   ├── room.js        # 共识演练房间：开启/加入/投票改票/主持结算/房间快照（聚合票数、结算留痕）
+│   ├── room.js        # 共识演练房间：开启（可选限时）/加入/投票改票/主持结算/重开/到期自动补办/房间快照（聚合票数、结算留痕、截止时间）
 │   ├── coverage.js    # 处置覆盖报告：覆盖项枚举 + 按家族去重的已完成路径回放（损坏整体报错）
 │   └── seed.js        # 内置示例情境（首启写入）
 ├── public/
 │   ├── index.html     # 单页界面（学员演练 / 共识演练 / 培训师编排三个页签，编排内含处置覆盖报告视图）
 │   ├── styles.css
-│   └── app.js         # 含复盘分叉面板、来源/分支对照树、处置覆盖报告视图与共识演练房间视图（投票/主持台/轮询）
+│   └── app.js         # 含复盘分叉面板、来源/分支对照树、处置覆盖报告视图与共识演练房间视图（投票/主持台/限时倒计时/重开/轮询）
 └── data/              # 运行后生成：SQLite 数据库（持久化卷）
 ```
 
